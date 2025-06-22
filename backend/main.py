@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Query, Body
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from path_planner import (
     get_directions,
@@ -457,3 +458,62 @@ def simple_evac_route(data: dict = Body(...)):
         }
     }
 
+from fastapi import Query
+from typing import List
+
+@app.get("/best-route")
+def simple_evac_route(
+    start: str = Query(..., description="User’s current location"),
+    threats: Optional[str] = Query("", description="Comma-separated threat locations (e.g., 'lobby,store room')")
+):
+    # Convert comma-separated string to set of lowercased threat nodes
+    threat_set = set(t.strip().lower() for t in threats.split(",") if t.strip())
+
+    if not start or start not in positions:
+        return {"error": "Invalid or missing start location."}
+
+    exit_keywords = {"exit"}
+    candidate_exits = [
+        name for name in positions
+        if any(k in name.lower() for k in exit_keywords)
+    ]
+
+    if not candidate_exits:
+        return {"error": "No exits found in the layout."}
+
+    best_path = None
+    best_exit = None
+    min_distance = float("inf")
+
+    for dest in candidate_exits:
+        all_paths = find_all_paths(graph_input=None, start=start, end=dest)
+        safe_paths = [p for p in all_paths if is_safe_path(p, threat_set)]
+        if not safe_paths:
+            continue
+
+        safe_paths.sort(key=lambda p: get_total_distance(p, positions))
+        path = safe_paths[0]
+        distance = get_total_distance(path, positions)
+
+        if distance < min_distance:
+            best_path = path
+            best_exit = dest
+            min_distance = distance
+
+    if not best_path:
+        return {"error": "All exits are blocked due to threats."}
+
+    detailed = describe_route(best_path, positions)
+    optimized = optimize_directions_with_landmarks(detailed, best_path, positions)
+
+    return {
+        "start": start,
+        "chosen_exit": best_exit,
+        "threats_avoided": list(threat_set),
+        "shortest_safe_path": {
+            "path": best_path,
+            "total_distance_m": round(min_distance / 100.0, 1),
+            "detailed_directions": detailed,
+            "optimized_directions": optimized
+        }
+    }
