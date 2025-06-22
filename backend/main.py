@@ -182,24 +182,43 @@ def remove_user(data: dict = Body(...)):
 @app.post("/auto-reroute")
 def auto_reroute(data: dict = Body(...)):
     user_id = data.get("user_id")
-    destination = data.get("destination", "").lower()
 
     if not user_id or user_id not in user_locations:
         return {"error": "User location not found."}
-    if destination not in positions:
-        return {"error": "Invalid destination."}
 
     current_position = user_locations[user_id]
-    all_paths = find_all_paths(graph_input=None, start=current_position, end=destination)
-    if not all_paths:
-        return {"error": "No path found."}
 
-    safe_paths = [p for p in all_paths if is_safe_path(p, active_threats)]
-    if not safe_paths:
-        return {"error": "All known paths are blocked due to threats."}
+    # Detect exits
+    exit_keywords = {"exit"}
+    candidate_exits = [
+        name for name in positions
+        if any(k in name.lower() for k in exit_keywords)
+    ]
 
-    safe_paths.sort(key=lambda p: get_total_distance(p, positions))
-    best_path = safe_paths[0]
+    if not candidate_exits:
+        return {"error": "No exits found in the layout."}
+
+    best_path = None
+    best_exit = None
+    min_distance = float("inf")
+
+    for dest in candidate_exits:
+        all_paths = find_all_paths(graph_input=None, start=current_position, end=dest)
+        safe_paths = [p for p in all_paths if is_safe_path(p, active_threats)]
+        if not safe_paths:
+            continue
+
+        safe_paths.sort(key=lambda p: get_total_distance(p, positions))
+        path = safe_paths[0]
+        distance = get_total_distance(path, positions)
+
+        if distance < min_distance:
+            best_path = path
+            best_exit = dest
+            min_distance = distance
+
+    if not best_path:
+        return {"error": "All paths to all exits are blocked due to threats."}
 
     detailed = describe_route(best_path, positions)
     optimized = optimize_directions_with_landmarks(detailed, best_path, positions)
@@ -207,13 +226,234 @@ def auto_reroute(data: dict = Body(...)):
     return {
         "user_id": user_id,
         "current_position": current_position,
-        "destination": destination,
+        "chosen_exit": best_exit,
         "threats": list(active_threats),
-        "total_safe_paths": len(safe_paths),
+        "total_safe_paths": "shortest path to nearest exit",
         "shortest_safe_path": {
             "path": best_path,
-            "total_distance_m": round(get_total_distance(best_path, positions) / 100.0, 1),
+            "total_distance_m": round(min_distance / 100.0, 1),
             "detailed_directions": detailed,
             "optimized_directions": optimized
         }
     }
+
+
+@app.post("/auto-reroute-with-threats")
+def auto_reroute_with_threats(data: dict = Body(...)):
+    user_id = data.get("user_id")
+    threat_list = data.get("threats", [])
+
+    if not user_id or user_id not in user_locations:
+        return {"error": "User location not found."}
+
+    current_position = user_locations[user_id]
+    blocked_nodes = set(t.lower() for t in threat_list)
+
+    # Detect all exits
+    exit_keywords = {"exit"}
+    candidate_exits = [
+        name for name in positions
+        if any(k in name.lower() for k in exit_keywords)
+    ]
+
+    if not candidate_exits:
+        return {"error": "No exits found in the layout."}
+
+    best_path = None
+    best_exit = None
+    min_distance = float("inf")
+
+    for dest in candidate_exits:
+        all_paths = find_all_paths(graph_input=None, start=current_position, end=dest)
+        safe_paths = [p for p in all_paths if is_safe_path(p, blocked_nodes)]
+        if not safe_paths:
+            continue
+
+        safe_paths.sort(key=lambda p: get_total_distance(p, positions))
+        path = safe_paths[0]
+        distance = get_total_distance(path, positions)
+
+        if distance < min_distance:
+            best_path = path
+            best_exit = dest
+            min_distance = distance
+
+    if not best_path:
+        return {"error": "All exits are blocked due to threats."}
+
+    detailed = describe_route(best_path, positions)
+    optimized = optimize_directions_with_landmarks(detailed, best_path, positions)
+
+    return {
+        "user_id": user_id,
+        "current_position": current_position,
+        "chosen_exit": best_exit,
+        "threats": list(blocked_nodes),
+        "shortest_safe_path": {
+            "path": best_path,
+            "total_distance_m": round(min_distance / 100.0, 1),
+            "detailed_directions": detailed,
+            "optimized_directions": optimized
+        }
+    }
+
+@app.post("/simple-evac-route")
+def simple_evac_route(data: dict = Body(...)):
+    start = data.get("start")
+    if not start or start not in positions:
+        return {"error": "Invalid or missing start location."}
+
+    exit_keywords = {"exit"}
+    candidate_exits = [
+        name for name in positions
+        if any(k in name.lower() for k in exit_keywords)
+    ]
+
+    if not candidate_exits:
+        return {"error": "No exits found in the layout."}
+
+    best_path = None
+    best_exit = None
+    min_distance = float("inf")
+
+    for dest in candidate_exits:
+        all_paths = find_all_paths(graph_input=None, start=start, end=dest)
+        safe_paths = [p for p in all_paths if is_safe_path(p, active_threats)]  # still avoids global threats
+        if not safe_paths:
+            continue
+
+        safe_paths.sort(key=lambda p: get_total_distance(p, positions))
+        path = safe_paths[0]
+        distance = get_total_distance(path, positions)
+
+        if distance < min_distance:
+            best_path = path
+            best_exit = dest
+            min_distance = distance
+
+    if not best_path:
+        return {"error": "All exits are blocked or unreachable."}
+
+    detailed = describe_route(best_path, positions)
+    optimized = optimize_directions_with_landmarks(detailed, best_path, positions)
+
+    return {
+        "start": start,
+        "chosen_exit": best_exit,
+        "shortest_path": {
+            "path": best_path,
+            "total_distance_m": round(min_distance / 100.0, 1),
+            "detailed_directions": detailed,
+            "optimized_directions": optimized
+        }
+    }
+
+
+@app.post("/simple-evac-route-with-threats")
+def simple_evac_route_with_threats(data: dict = Body(...)):
+    start = data.get("start")
+    threats = set(t.lower() for t in data.get("threats", []))
+
+    if not start or start not in positions:
+        return {"error": "Invalid or missing start location."}
+
+    exit_keywords = {"exit"}
+    candidate_exits = [
+        name for name in positions
+        if any(k in name.lower() for k in exit_keywords)
+    ]
+
+    if not candidate_exits:
+        return {"error": "No exits found in the layout."}
+
+    best_path = None
+    best_exit = None
+    min_distance = float("inf")
+
+    for dest in candidate_exits:
+        all_paths = find_all_paths(graph_input=None, start=start, end=dest)
+        safe_paths = [p for p in all_paths if is_safe_path(p, threats)]
+        if not safe_paths:
+            continue
+
+        safe_paths.sort(key=lambda p: get_total_distance(p, positions))
+        path = safe_paths[0]
+        distance = get_total_distance(path, positions)
+
+        if distance < min_distance:
+            best_path = path
+            best_exit = dest
+            min_distance = distance
+
+    if not best_path:
+        return {"error": "All exits are blocked due to threats."}
+
+    detailed = describe_route(best_path, positions)
+    optimized = optimize_directions_with_landmarks(detailed, best_path, positions)
+
+    return {
+        "start": start,
+        "threats_avoided": list(threats),
+        "chosen_exit": best_exit,
+        "shortest_safe_path": {
+            "path": best_path,
+            "total_distance_m": round(min_distance / 100.0, 1),
+            "detailed_directions": detailed,
+            "optimized_directions": optimized
+        }
+    }
+
+@app.post("/simple-evac-route-optional-threat")
+def simple_evac_route(data: dict = Body(...)):
+    start = data.get("start")
+    threats = set(t.lower() for t in data.get("threats", []))
+
+    if not start or start not in positions:
+        return {"error": "Invalid or missing start location."}
+
+    exit_keywords = {"exit"}
+    candidate_exits = [
+        name for name in positions
+        if any(k in name.lower() for k in exit_keywords)
+    ]
+
+    if not candidate_exits:
+        return {"error": "No exits found in the layout."}
+
+    best_path = None
+    best_exit = None
+    min_distance = float("inf")
+
+    for dest in candidate_exits:
+        all_paths = find_all_paths(graph_input=None, start=start, end=dest)
+        safe_paths = [p for p in all_paths if is_safe_path(p, threats)]
+        if not safe_paths:
+            continue
+
+        safe_paths.sort(key=lambda p: get_total_distance(p, positions))
+        path = safe_paths[0]
+        distance = get_total_distance(path, positions)
+
+        if distance < min_distance:
+            best_path = path
+            best_exit = dest
+            min_distance = distance
+
+    if not best_path:
+        return {"error": "All exits are blocked due to threats."}
+
+    detailed = describe_route(best_path, positions)
+    optimized = optimize_directions_with_landmarks(detailed, best_path, positions)
+
+    return {
+        "start": start,
+        "chosen_exit": best_exit,
+        "threats_avoided": list(threats),
+        "shortest_safe_path": {
+            "path": best_path,
+            "total_distance_m": round(min_distance / 100.0, 1),
+            "detailed_directions": detailed,
+            "optimized_directions": optimized
+        }
+    }
+
